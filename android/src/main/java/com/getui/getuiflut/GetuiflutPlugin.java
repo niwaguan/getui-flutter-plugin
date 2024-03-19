@@ -1,36 +1,49 @@
 package com.getui.getuiflut;
 
 import android.content.Context;
+import android.content.Intent;
 import android.os.Looper;
 import android.os.Message;
 import android.util.Log;
 import android.os.Handler;
 
 
+import androidx.annotation.NonNull;
+
+import com.igexin.sdk.PushConsts;
 import com.igexin.sdk.PushManager;
 import com.igexin.sdk.Tag;
+import com.igexin.sdk.message.GTNotificationMessage;
 
 import java.lang.reflect.Method;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
+import io.flutter.embedding.engine.plugins.activity.ActivityAware;
+import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
+import io.flutter.plugin.common.PluginRegistry;
 
 /**
  * GetuiflutPlugin
  */
-public class GetuiflutPlugin implements MethodCallHandler, FlutterPlugin {
+public class GetuiflutPlugin implements MethodCallHandler, FlutterPlugin, PluginRegistry.NewIntentListener, ActivityAware {
 
     private static final String TAG = "GetuiflutPlugin";
     private static final int FLUTTER_CALL_BACK_CID = 1;
     private static final int FLUTTER_CALL_BACK_MSG = 2;
     private static final int FLUTTER_CALL_BACK_MSG_USER = 3;
+    private static final int FLUTTER_CALL_BACK_MSG_NEW_INTENT = 4;
 
 
     /// The MethodChannel that will the communication between Flutter and native Android
@@ -39,7 +52,7 @@ public class GetuiflutPlugin implements MethodCallHandler, FlutterPlugin {
     /// when the Flutter Engine is detached from the Activity
     private MethodChannel channel;
     private Context fContext;
-
+    private  ActivityPluginBinding activityPluginBinding;
     public static GetuiflutPlugin instance;
 
     public GetuiflutPlugin() {
@@ -56,6 +69,63 @@ public class GetuiflutPlugin implements MethodCallHandler, FlutterPlugin {
     @Override
     public void onDetachedFromEngine(FlutterPlugin.FlutterPluginBinding binding) {
         channel.setMethodCallHandler(null);
+    }
+
+    boolean handleNotificationIntent(Intent intent, boolean onActivityAttached) {
+        if (intent == null) {
+            return false;
+        }
+        boolean isAppPush = intent.getBooleanExtra("app_push", false);
+        if (!isAppPush) {
+            return false;
+        }
+        Map<String, Object> message = new HashMap<>();
+        String payload = intent.getStringExtra("payload");
+        if (payload != null) {
+            message.put("payload", payload);
+        }
+        if (onActivityAttached) {
+            message.put("initApp", true);
+        }
+
+        Message msg = Message.obtain();
+        msg.what = FLUTTER_CALL_BACK_MSG_NEW_INTENT;
+        msg.obj = message;
+        flutterHandler.sendMessage(msg);
+
+        pushClick(intent);
+
+        return true;
+    }
+
+    @Override
+    public boolean onNewIntent(@NonNull Intent intent) {
+        return handleNotificationIntent(intent, false);
+    }
+
+    @Override
+    public void onAttachedToActivity(@NonNull ActivityPluginBinding binding) {
+        activityPluginBinding = binding;
+        activityPluginBinding.addOnNewIntentListener(this);
+        handleNotificationIntent(binding.getActivity().getIntent(), true);
+    }
+
+    @Override
+    public void onDetachedFromActivityForConfigChanges() {
+        activityPluginBinding.removeOnNewIntentListener(this);
+        activityPluginBinding = null;
+    }
+
+    @Override
+    public void onReattachedToActivityForConfigChanges(@NonNull ActivityPluginBinding binding) {
+        activityPluginBinding = binding;
+        activityPluginBinding.addOnNewIntentListener(this);
+    }
+
+    @Override
+    public void onDetachedFromActivity() {
+        activityPluginBinding.removeOnNewIntentListener(this);
+        activityPluginBinding = null;
     }
 
 
@@ -109,6 +179,10 @@ public class GetuiflutPlugin implements MethodCallHandler, FlutterPlugin {
                 case FLUTTER_CALL_BACK_MSG_USER:
                     GetuiflutPlugin.instance.channel.invokeMethod("onTransmitUserMessageReceive", msg.obj);
                     Log.d(TAG, "default user Message >>> " + msg.obj);
+                    break;
+                case FLUTTER_CALL_BACK_MSG_NEW_INTENT:
+                    GetuiflutPlugin.instance.channel.invokeMethod("onIntentReceive", msg.obj);
+                    Log.d(TAG, "onIntentReceive >>> " + msg.obj);
                     break;
                 default:
                     break;
@@ -289,6 +363,63 @@ public class GetuiflutPlugin implements MethodCallHandler, FlutterPlugin {
         Message msg = Message.obtain();
         msg.what = FLUTTER_CALL_BACK_MSG_USER;
         msg.obj = message;
+        flutterHandler.sendMessage(msg);
+    }
+    /**
+     * 由于华为、oppo 无点击数报表返回，vivo无单推点击数报表返回，所以需要您在客户端埋点上报。
+     * 点击厂商通知以后，在触发的activity的onCreate()方法里面接收相关参数，上报这 3 个离线厂商消息的点击数据。
+     * 开发者可直接使用此方法示例
+     *
+     * @param intent
+     * @return
+     */
+    public boolean pushClick(Intent intent) {
+        boolean result = false;
+        try {
+            String taskid = intent.getStringExtra("gttask");
+            String gtaction = intent.getStringExtra("gtaction");
+            String clientid = PushManager.getInstance().getClientid(fContext.getApplicationContext());
+            String messageid;
+            String uuid = UUID.randomUUID().toString().replaceAll("-", "");
+            // 这里的messageid需要自定义， 保证每条消息汇报的都不相同
+            String contentToDigest = taskid + clientid + uuid;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
+                byte[] md5s = MessageDigest.getInstance("MD5").digest(contentToDigest.getBytes(StandardCharsets.UTF_8));
+                messageid = new BigInteger(1, md5s).toString(16);
+            } else {
+                messageid = contentToDigest;
+            }
+
+            /***
+             * 第三方回执调用接口，可根据业务场景执行
+             * 注意：只能用下面回执对应的机型进行上报点击测试，其它机型获取不到 gttask 字段
+             *
+             * 60020 华为点击
+             * 60030 oppo点击
+             * 60040 vivo点击
+             * 60070 荣耀点击
+             *
+             * 埋点接口对应填写获取到的actionid值，如果有获取到 actionid 值，就上报埋点，如 果没有则不用上报。
+             *
+             */
+            if (gtaction != null) {
+                int actionid = Integer.parseInt(gtaction);
+                result = PushManager.getInstance().sendFeedbackMessage(fContext.getApplicationContext(), taskid, messageid, actionid);
+            }
+        } catch (Exception e) {
+            //…………
+        }
+        return result;
+    }
+    void onNotificationIntentReceived(Map<String, Object> message, boolean onActivityAttached) {
+        Map<String, Object> notification = new HashMap<>(message);
+        if (onActivityAttached) {
+            notification.put("launchPoint", true);
+        }
+
+        Message msg = Message.obtain();
+        msg.what = FLUTTER_CALL_BACK_MSG_NEW_INTENT;
+        msg.obj = notification;
         flutterHandler.sendMessage(msg);
     }
 }

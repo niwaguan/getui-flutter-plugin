@@ -1,6 +1,7 @@
 import 'dart:async';
-import 'package:flutter/services.dart';
 import 'dart:io';
+
+import 'package:flutter/services.dart';
 
 typedef Future<dynamic> EventHandler(String res);
 typedef Future<dynamic> EventHandlerMap(Map<String, dynamic> event);
@@ -13,6 +14,9 @@ class Getuiflut {
   late EventHandlerMap _onNotificationMessageArrived;
   late EventHandlerMap _onNotificationMessageClicked;
   late EventHandlerMap _onTransmitUserMessageReceive;
+
+  /// Android接受到新的Intent
+  late EventHandlerMap? _onIntentReceive;
 
   // deviceToken
   late EventHandler _onRegisterDeviceToken;
@@ -169,6 +173,7 @@ class Getuiflut {
     required EventHandler onGrantAuthorization,
     // ios收到实时活动（灵动岛）token回调
     required EventHandlerMap onLiveActivityResult,
+    EventHandlerMap? onIntentReceive,
   }) {
     _onReceiveClientId = onReceiveClientId;
 
@@ -195,6 +200,7 @@ class Getuiflut {
     _onGrantAuthorization = onGrantAuthorization;
 
     _onLiveActivityResult = onLiveActivityResult;
+    _onIntentReceive = onIntentReceive;
 
     _channel.setMethodCallHandler(_handleMethod);
   }
@@ -247,6 +253,12 @@ class Getuiflut {
 
       case "onLiveActivityResult":
         return _onLiveActivityResult(call.arguments);
+
+      case "onIntentReceive":
+        if (_onIntentReceive != null) {
+          return _onIntentReceive!(call.arguments.cast<String, dynamic>());
+        }
+        return false;
 
       default:
         throw new UnsupportedError("Unrecongnized Event");
